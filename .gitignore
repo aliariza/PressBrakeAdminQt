@@ -24,3 +24,6 @@ qrc_*.cpp
 # Logs
 *.log
 data/admin.pass
+*.bak
+data/*.bak
+data/*.csv.*.bak
