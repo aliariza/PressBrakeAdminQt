@@ -1,0 +1,25 @@
+# Build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.ninja
+.ninja_*
+
+# Qt / moc / autogen
+*_autogen/
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
