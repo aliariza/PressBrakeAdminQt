@@ -1,5 +1,3 @@
-// src/DbEditorWidget.cpp
-
 #include "DbEditorWidget.hpp"
 
 #include "CsvTableModel.hpp"
@@ -23,9 +21,15 @@
 #include <QRegularExpression>
 #include <QAbstractItemView>
 #include <QItemSelectionModel>
+
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+
 #include <algorithm>
+#include <vector>
 
-
+// ---- Proxy model: filter rows if ANY cell contains the search text
 class RowFilterProxy : public QSortFilterProxyModel {
 public:
   using QSortFilterProxyModel::QSortFilterProxyModel;
@@ -44,6 +48,38 @@ protected:
   }
 };
 
+// ---- Schema helpers: store numeric columns per CSV in a sidecar JSON
+static QString schemaPathFor(const QString& csvPath) {
+  return csvPath + ".schema.json";
+}
+
+static void loadSchemaIntoModel(const QString& csvPath, CsvTableModel* model) {
+  model->setNumericColumns({});
+
+  QFile f(schemaPathFor(csvPath));
+  if (!f.open(QIODevice::ReadOnly)) return;
+
+  const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+  if (!doc.isObject()) return;
+
+  const QJsonArray arr = doc.object().value("numeric").toArray();
+  QSet<QString> set;
+  for (const auto& v : arr) set.insert(v.toString().trimmed().toLower());
+  model->setNumericColumns(set);
+}
+
+static void saveSchemaFromModel(const QString& csvPath, const CsvTableModel* model) {
+  QJsonArray arr;
+  for (const auto& s : model->numericColumns()) arr.append(s);
+
+  QJsonObject obj;
+  obj["numeric"] = arr;
+
+  QFile f(schemaPathFor(csvPath));
+  if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+  f.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+}
+
 DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   auto* v = new QVBoxLayout(this);
 
@@ -51,20 +87,18 @@ DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   auto* top = new QHBoxLayout();
   dbSelector_ = new QComboBox(this);
 
-  // Keep these labels consistent with your project
   dbSelector_->addItem("MATERIAL", "data/material.csv");
   dbSelector_->addItem("MACHINE",  "data/machine.csv");
   dbSelector_->addItem("MACHINES", "data/machines.csv");
   dbSelector_->addItem("TOOLING",  "data/tooling.csv");
   dbSelector_->addItem("OPTIONS",  "data/options.csv");
-  lastIndex_ = dbSelector_->currentIndex();
 
   loadBtn_    = new QPushButton("Load", this);
   saveBtn_    = new QPushButton("Save", this);
   saveAllBtn_ = new QPushButton("Save All", this);
 
   addRowBtn_  = new QPushButton("Add Row", this);
-  delRowBtn_ = new QPushButton("Delete Selected Rows", this);
+  delRowBtn_  = new QPushButton("Delete Selected Rows", this);
 
   addColBtn_  = new QPushButton("Add Column", this);
   delColBtn_  = new QPushButton("Delete Column", this);
@@ -78,26 +112,28 @@ DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   top->addWidget(delRowBtn_);
   top->addWidget(addColBtn_);
   top->addWidget(delColBtn_);
-
   v->addLayout(top);
+
   // Search row
   auto* searchRow = new QHBoxLayout();
   search_ = new QLineEdit(this);
   search_->setPlaceholderText("Search… (filters rows)");
   searchRow->addWidget(search_);
   v->addLayout(searchRow);
-  // Table + Model
+
+  // Model + Proxy + Table
   model_ = new CsvTableModel(this);
-  
+
   proxy_ = new RowFilterProxy(this);
   proxy_->setSourceModel(model_);
   proxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
-  
+
   table_ = new QTableView(this);
   table_->setModel(proxy_);
   table_->setAlternatingRowColors(true);
   table_->setSortingEnabled(false);
   table_->horizontalHeader()->setSectionsClickable(true);
+
   table_->setSelectionBehavior(QAbstractItemView::SelectRows);
   table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
 
@@ -106,13 +142,6 @@ DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   // Track last clicked header column for Delete Column UX
   connect(table_->horizontalHeader(), &QHeaderView::sectionClicked,
           this, [this](int logicalIndex) { lastHeaderCol_ = logicalIndex; });
-    // Search box -> filter proxy
-    connect(search_, &QLineEdit::textChanged, this, [this](const QString& t){
-  // Escape user text so it behaves like plain “contains”, not regex syntax
-  QRegularExpression re(QRegularExpression::escape(t),
-                        QRegularExpression::CaseInsensitiveOption);
-  proxy_->setFilterRegularExpression(re);
-});
 
   // Dirty tracking
   connect(model_, &QAbstractItemModel::dataChanged, this,
@@ -126,10 +155,14 @@ DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   connect(model_, &QAbstractItemModel::columnsRemoved, this,
           [this](const QModelIndex&, int, int) { setDirty(true); });
 
-  // UI connections
-  connect(dbSelector_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-          this, &DbEditorWidget::onDatabaseChanged);
+  // Search -> proxy regex (escape user input)
+  connect(search_, &QLineEdit::textChanged, this, [this](const QString& t) {
+    QRegularExpression re(QRegularExpression::escape(t),
+                          QRegularExpression::CaseInsensitiveOption);
+    proxy_->setFilterRegularExpression(re);
+  });
 
+  // UI connections
   connect(loadBtn_,    &QPushButton::clicked, this, &DbEditorWidget::onLoad);
   connect(saveBtn_,    &QPushButton::clicked, this, &DbEditorWidget::onSave);
   connect(saveAllBtn_, &QPushButton::clicked, this, &DbEditorWidget::onSaveAll);
@@ -140,8 +173,12 @@ DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   connect(addColBtn_, &QPushButton::clicked, this, &DbEditorWidget::onAddColumn);
   connect(delColBtn_, &QPushButton::clicked, this, &DbEditorWidget::onDeleteColumn);
 
-  // Initial
-  onDatabaseChanged(dbSelector_->currentIndex());
+  connect(dbSelector_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &DbEditorWidget::onDatabaseChanged);
+
+  // Initial state
+  lastIndex_ = dbSelector_->currentIndex();
+  currentPath_ = dbSelector_->itemData(lastIndex_).toString();
   onLoad();
 }
 
@@ -185,7 +222,6 @@ void DbEditorWidget::onDatabaseChanged(int idx) {
   onLoad();
 }
 
-
 void DbEditorWidget::onLoad() {
   loadDb(currentPath_);
   setDirty(false);
@@ -203,7 +239,7 @@ void DbEditorWidget::onSaveAll() {
   // Save current view first
   saveDb(cur);
 
-  // Normalize/backup-save others by loading + saving each
+  // Normalize + backup-save the others by loading + saving each
   for (const auto& p : paths) {
     if (p == cur) continue;
     loadDb(p);
@@ -218,6 +254,9 @@ void DbEditorWidget::onSaveAll() {
 }
 
 void DbEditorWidget::loadDb(const QString& path) {
+  // Load schema first (so model knows numeric columns before edits)
+  loadSchemaIntoModel(path, model_);
+
   QFile f(path);
   if (!f.exists()) {
     model_->clear();
@@ -251,16 +290,14 @@ void DbEditorWidget::loadDb(const QString& path) {
 
   model_->setTable(headers, rows);
 
-  // UX: ensure something is selected
-  if (model_->rowCount() > 0 && model_->columnCount() > 0) {
-    table_->setCurrentIndex(model_->index(0, 0));
-  }
+  // UX: ensure something is selected (through proxy)
   if (proxy_->rowCount() > 0 && proxy_->columnCount() > 0) {
     table_->setCurrentIndex(proxy_->index(0, 0));
-    }
+  }
 }
 
 void DbEditorWidget::saveDb(const QString& path) {
+  // Backup CSV (keep last 10)
   BackupUtils::makeTimestampedBackupKeepN(path, this, 10);
 
   QFile f(path);
@@ -276,19 +313,20 @@ void DbEditorWidget::saveDb(const QString& path) {
   for (const auto& row : model_->rows()) {
     out << CsvUtils::encodeCsvRecord(row) << "\n";
   }
+
+  // Save schema (no backups needed; it changes rarely, but you can add if you want)
+  saveSchemaFromModel(path, model_);
 }
 
 void DbEditorWidget::onAddRow() {
   model_->addRow();
 
-  // Select last row in source, but might be filtered out; just clear filter first is optional.
-  // We'll select it via proxy if visible.
+  // Select last row if visible through proxy
   const int sourceRow = model_->rowCount() - 1;
   if (sourceRow >= 0) {
     QModelIndex srcIdx = model_->index(sourceRow, 0);
     QModelIndex pIdx = proxy_->mapFromSource(srcIdx);
-    if (pIdx.isValid())
-      table_->selectRow(pIdx.row());
+    if (pIdx.isValid()) table_->selectRow(pIdx.row());
   }
 }
 
@@ -301,23 +339,22 @@ void DbEditorWidget::onDeleteRow() {
     return;
   }
 
-  const int n = selected.size();
   auto reply = QMessageBox::question(
       this,
       "Delete Rows",
-      QString("Delete %1 selected row(s)?").arg(n));
+      QString("Delete %1 selected row(s)?").arg(selected.size()));
 
   if (reply != QMessageBox::Yes) return;
 
   // Map proxy rows -> source rows
   std::vector<int> sourceRows;
-  sourceRows.reserve(selected.size());
+  sourceRows.reserve(static_cast<size_t>(selected.size()));
   for (const auto& pIdx : selected) {
-    const int srcRow = proxy_ ? proxy_->mapToSource(pIdx).row() : pIdx.row();
+    const int srcRow = proxy_->mapToSource(pIdx).row();
     if (srcRow >= 0) sourceRows.push_back(srcRow);
   }
 
-  // Sort descending so deletions don't shift later indices
+  // Unique + sort descending
   std::sort(sourceRows.begin(), sourceRows.end());
   sourceRows.erase(std::unique(sourceRows.begin(), sourceRows.end()), sourceRows.end());
   std::sort(sourceRows.rbegin(), sourceRows.rend());
@@ -325,34 +362,54 @@ void DbEditorWidget::onDeleteRow() {
   for (int r : sourceRows) model_->deleteRow(r);
 }
 
-
 void DbEditorWidget::onAddColumn() {
   bool ok = false;
   QString name = QInputDialog::getText(this, "Add Column", "Column name:",
                                        QLineEdit::Normal, "", &ok);
   if (!ok || name.trimmed().isEmpty()) return;
-  model_->addColumn(name.trimmed());
+  name = name.trimmed();
+
+  // Ask column type
+  QMessageBox typeBox(this);
+  typeBox.setWindowTitle("Column Type");
+  typeBox.setText("Select the type for the new column:");
+  auto* textBtn = typeBox.addButton("Text", QMessageBox::AcceptRole);
+  auto* numBtn  = typeBox.addButton("Numeric", QMessageBox::AcceptRole);
+  typeBox.addButton(QMessageBox::Cancel);
+
+  typeBox.exec();
+  if (typeBox.clickedButton() == nullptr) return;
+  if (typeBox.clickedButton() == textBtn) {
+    model_->addColumn(name, false);
+  } else if (typeBox.clickedButton() == numBtn) {
+    model_->addColumn(name, true);
+  } else {
+    return; // cancel
+  }
 }
 
 void DbEditorWidget::onDeleteColumn() {
   int col = table_->currentIndex().column();
   if (col < 0) col = lastHeaderCol_;
-
   if (col < 0) {
     QMessageBox::information(this, "Delete Column",
                              "Click a column header or select a cell in the column you want to delete.");
     return;
   }
 
+  // Column index is in proxy coordinates; map to source column (same order)
+  // For QSortFilterProxyModel without column filtering, column index is same.
+  const int sourceCol = col;
+
   auto reply = QMessageBox::question(
       this,
       "Delete Column",
-      "Delete column '" + model_->headers().value(col) + "' ?");
+      "Delete column '" + model_->headers().value(sourceCol) + "' ?");
 
   if (reply != QMessageBox::Yes) return;
 
-  model_->deleteColumn(col);
+  model_->deleteColumn(sourceCol);
 
-  if (lastHeaderCol_ == col) lastHeaderCol_ = -1;
-  else if (lastHeaderCol_ > col) lastHeaderCol_--;
+  if (lastHeaderCol_ == sourceCol) lastHeaderCol_ = -1;
+  else if (lastHeaderCol_ > sourceCol) lastHeaderCol_--;
 }

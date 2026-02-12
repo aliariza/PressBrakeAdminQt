@@ -1,13 +1,15 @@
 #pragma once
+
 #include <QWidget>
+#include <QString>
 
 class QComboBox;
 class QTableView;
 class QPushButton;
-class CsvTableModel;
 class QLineEdit;
 class QSortFilterProxyModel;
 
+class CsvTableModel;
 
 class DbEditorWidget : public QWidget {
   Q_OBJECT
@@ -19,8 +21,10 @@ private slots:
   void onLoad();
   void onSave();
   void onSaveAll();
+
   void onAddRow();
   void onDeleteRow();
+
   void onAddColumn();
   void onDeleteColumn();
 
@@ -30,8 +34,11 @@ private:
   void setDirty(bool on);
 
   QComboBox* dbSelector_ = nullptr;
+  QLineEdit* search_ = nullptr;
+
   QTableView* table_ = nullptr;
   CsvTableModel* model_ = nullptr;
+  QSortFilterProxyModel* proxy_ = nullptr;
 
   QPushButton* loadBtn_ = nullptr;
   QPushButton* saveBtn_ = nullptr;
@@ -43,12 +50,9 @@ private:
   QPushButton* addColBtn_ = nullptr;
   QPushButton* delColBtn_ = nullptr;
 
-  QLineEdit* search_ = nullptr;
-  QSortFilterProxyModel* proxy_ = nullptr;
-
   QString currentPath_;
   bool dirty_ = false;
-  int lastHeaderCol_ = -1;
 
+  int lastHeaderCol_ = -1;
   int lastIndex_ = 0;
 };
