@@ -1,5 +1,9 @@
 #include "CsvTableModel.hpp"
 
+#include <QRegularExpression>
+#include <QLocale>
+
+
 CsvTableModel::CsvTableModel(QObject* parent) : QAbstractTableModel(parent) {}
 
 int CsvTableModel::rowCount(const QModelIndex&) const { return rows_.size(); }
@@ -17,16 +21,47 @@ QVariant CsvTableModel::data(const QModelIndex& index, int role) const {
 }
 
 bool CsvTableModel::setData(const QModelIndex& index, const QVariant& value, int role) {
-  if (!index.isValid() || role != Qt::EditRole) return false;
-  const int r = index.row(), c = index.column();
-  if (r < 0 || r >= rows_.size() || c < 0 || c >= headers_.size()) return false;
+  if (!index.isValid()) return false;
+  if (role != Qt::EditRole && role != Qt::DisplayRole) return false;
 
-  auto& row = rows_[r];
-  if (row.size() < headers_.size()) row.resize(headers_.size());
-  row[c] = value.toString();
+  const int r = index.row();
+  const int c = index.column();
+  if (r < 0 || r >= rows_.size()) return false;
+  if (c < 0 || c >= headers_.size()) return false;
+
+  QString text = value.toString();
+
+  // ---- Numeric validation (only for selected columns)
+  if (isNumericColumn(c)) {
+    QString trimmed = text.trimmed();
+
+    // allow clearing the cell
+    if (!trimmed.isEmpty()) {
+      double num = 0.0;
+      if (!parseNumber(trimmed, num)) {
+        // reject invalid numeric input
+        return false;
+      }
+
+      // normalize: store with '.' decimal, remove leading/trailing spaces
+      // (optional) keep as user typed; but normalization helps consistency:
+      trimmed.replace(',', '.');
+      text = trimmed;
+    } else {
+      text.clear();
+    }
+  }
+
+  // Resize row to match headers (safety)
+  if (rows_[r].size() != headers_.size()) rows_[r].resize(headers_.size());
+
+  if (rows_[r][c] == text) return true;
+
+  rows_[r][c] = text;
   emit dataChanged(index, index, {Qt::DisplayRole, Qt::EditRole});
   return true;
 }
+
 
 Qt::ItemFlags CsvTableModel::flags(const QModelIndex& index) const {
   if (!index.isValid()) return Qt::NoItemFlags;
@@ -92,4 +127,53 @@ void CsvTableModel::deleteRow(int row) {
   beginRemoveRows(QModelIndex(), row, row);
   rows_.removeAt(row);
   endRemoveRows();
+}
+
+bool CsvTableModel::isNumericColumn(int col) const {
+  if (col < 0 || col >= headers_.size()) return false;
+  const QString h = headers_[col].trimmed().toLower();
+
+  // ✅ Customize this list as you like
+  static const QStringList keys = {
+    "minton", "maxton", "ton", "tons",
+    "length", "width", "height",
+    "thickness", "radius",
+    "kg", "weight",
+    "power", "kw",
+    "v", "volt", "voltage",
+    "a", "amp", "current",
+    "price", "cost"
+  };
+
+  // exact match
+  if (keys.contains(h)) return true;
+
+  // common variants like "min_ton", "max-ton", "minTon"
+  QString simplified = h;
+  simplified.remove('_');
+  simplified.remove('-');
+  simplified.remove(' ');
+  if (keys.contains(simplified)) return true;
+
+  // also accept headers ending with known units, e.g. "maxTon", "minTon"
+  // (already covered by simplified list, but safe)
+  if (simplified.endsWith("ton") || simplified.endsWith("tons")) return true;
+
+  return false;
+}
+
+bool CsvTableModel::parseNumber(QString s, double& out) {
+  s = s.trimmed();
+  if (s.isEmpty()) return false;
+
+  // Normalize decimal comma to dot
+  s.replace(',', '.');
+
+  // Allow: -12, 12, 12.5, .5, 0.5
+  static const QRegularExpression re(R"(^[+-]?(\d+(\.\d*)?|\.\d+)$)");
+  if (!re.match(s).hasMatch()) return false;
+
+  bool ok = false;
+  out = s.toDouble(&ok);
+  return ok;
 }
