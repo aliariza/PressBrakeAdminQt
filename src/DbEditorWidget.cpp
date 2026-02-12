@@ -21,6 +21,10 @@
 #include <QStringConverter>
 #include <QSortFilterProxyModel>
 #include <QRegularExpression>
+#include <QAbstractItemView>
+#include <QItemSelectionModel>
+#include <algorithm>
+
 
 class RowFilterProxy : public QSortFilterProxyModel {
 public:
@@ -60,7 +64,7 @@ DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   saveAllBtn_ = new QPushButton("Save All", this);
 
   addRowBtn_  = new QPushButton("Add Row", this);
-  delRowBtn_  = new QPushButton("Delete Row", this);
+  delRowBtn_ = new QPushButton("Delete Selected Rows", this);
 
   addColBtn_  = new QPushButton("Add Column", this);
   delColBtn_  = new QPushButton("Delete Column", this);
@@ -94,6 +98,9 @@ DbEditorWidget::DbEditorWidget(QWidget* parent) : QWidget(parent) {
   table_->setAlternatingRowColors(true);
   table_->setSortingEnabled(false);
   table_->horizontalHeader()->setSectionsClickable(true);
+  table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+  table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
   v->addWidget(table_, 1);
 
   // Track last clicked header column for Delete Column UX
@@ -286,18 +293,36 @@ void DbEditorWidget::onAddRow() {
 }
 
 void DbEditorWidget::onDeleteRow() {
-  QModelIndex proxyIdx = table_->currentIndex();
-  if (!proxyIdx.isValid()) {
-    QMessageBox::information(this, "Delete Row", "Select a cell in the row you want to delete.");
+  if (!table_->selectionModel()) return;
+
+  const QModelIndexList selected = table_->selectionModel()->selectedRows();
+  if (selected.isEmpty()) {
+    QMessageBox::information(this, "Delete Rows", "Select one or more rows to delete.");
     return;
   }
 
-  const int sourceRow = proxy_->mapToSource(proxyIdx).row();
+  const int n = selected.size();
+  auto reply = QMessageBox::question(
+      this,
+      "Delete Rows",
+      QString("Delete %1 selected row(s)?").arg(n));
 
-  auto reply = QMessageBox::question(this, "Delete Row", "Delete selected row?");
   if (reply != QMessageBox::Yes) return;
 
-  model_->deleteRow(sourceRow);
+  // Map proxy rows -> source rows
+  std::vector<int> sourceRows;
+  sourceRows.reserve(selected.size());
+  for (const auto& pIdx : selected) {
+    const int srcRow = proxy_ ? proxy_->mapToSource(pIdx).row() : pIdx.row();
+    if (srcRow >= 0) sourceRows.push_back(srcRow);
+  }
+
+  // Sort descending so deletions don't shift later indices
+  std::sort(sourceRows.begin(), sourceRows.end());
+  sourceRows.erase(std::unique(sourceRows.begin(), sourceRows.end()), sourceRows.end());
+  std::sort(sourceRows.rbegin(), sourceRows.rend());
+
+  for (int r : sourceRows) model_->deleteRow(r);
 }
 
 
